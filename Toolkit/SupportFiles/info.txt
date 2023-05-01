@@ -1,0 +1,1 @@
+This directory is used to house support files needed by the application package.  This directory is usually empty, and that's okay.

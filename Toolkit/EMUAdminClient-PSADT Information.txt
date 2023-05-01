@@ -1,0 +1,11 @@
+This Version of PSADT is based off of version 3.9.3 and has been slightly modified in the following ways:
+
+- The Deploy-Application.ps1 script has been modified to include additional functions commonly utilized in 
+"Application Shimming"/"Application Compatibility" troubleshooting activities.  These are found under the 
+"# Start visuaFUSION Additional Provided Functions" and "# Start Community Additional Provided Functions" 
+section.  The functions themselves are part of the previously utilized "Modular Application Packaging" 
+concepts outlined by Sean Huggans on Bahusa.Net, but modified to utilize PSADT's logging functionality.
+
+- The Deploy-Application.ps1 script has been modified to include several injection comments utilized by
+the EMU Admin Client in "replace" functions.  This is how the EMU Admin Client is able to "fill the 
+information out" and generate the installation script for you.

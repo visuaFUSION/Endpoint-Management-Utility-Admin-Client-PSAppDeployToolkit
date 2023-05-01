@@ -1,0 +1,1 @@
+This directory is used to house source files needed by the application package.

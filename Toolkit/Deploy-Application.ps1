@@ -76,6 +76,10 @@ Toolkit Exit Code Ranges:
 .LINK
 
 https://psappdeploytoolkit.com
+
+This Script has been modified to work with EMU Admin Client's Application Packaging GUI:
+https://visuafusion.com/Applications/endpoint-management-utility-admin-client
+
 #>
 
 
@@ -95,14 +99,302 @@ Param (
     [switch]$DisableLogging = $false
 )
 
+#####################################################################
+# Start visuaFUSION Systems Solutions Additional Provided Functions #
+#####################################################################
+
+function Set-AppDirPermissions ($UserOrGroup, $Setting, $DirPath) {
+    ########################################
+    # Modify Directory Permissions
+    # Function Date: 19.3.13.1
+    # Function by Sean Huggans
+    ########################################
+    if (($UserOrGroup) -and ($Setting) -and ($DirPath)) {
+        try {
+            Write-Log -Severity 1 -Source "Directory Permission Adjustments" -Message "Granting ""$($UserOrGroup)"" ""$($Setting)"" permissions on ""$($DirPath)""..."
+            $InstallDirObject = Get-Item -LiteralPath $DirPath -ErrorAction Stop
+            $ACL = $InstallDirObject.GetAccessControl()
+            $Rule= New-Object System.Security.AccessControl.FileSystemAccessRule("$($UserOrGroup)","$($Setting)","ContainerInherit,Objectinherit","none","Allow")
+            $ACL.SetAccessRule($Rule)
+            $InstallDirObject.SetAccessControl($ACL)
+            Write-Log -Severity 1 -Source "Directory Permission Adjustments" -Message " - Success!"
+            return $true
+        } catch {
+            Write-Log -Severity 3 -Source "Directory Permission Adjustments" -Message " - Error!"
+            return $false
+        }
+    } else {
+        Write-Log -Severity 3 -Source "Directory Permission Adjustments" -Message " - Error! (Incomplete Parameters Passed)"
+        return $false
+    }
+}
+
+function Set-FilePermissions ($Setting, $FilePath, $UserOrGroup) {
+    ########################################
+    # Modify File Permissions
+    # Function Date: 19.3.13.1
+    # Function By: Sean Huggans
+    ########################################
+    if (($Setting) -and ($FilePath) -and ($UserOrGroup)) {
+        Write-Log -Severity 1 -Source "File Permission Adjustments" -Message "Applying '$($Setting)' permissions on '$($FilePath)'..."
+        try {
+            $InstallFileObject = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+            $ACL = $InstallFileObject.GetAccessControl()
+            $Rule= New-Object System.Security.AccessControl.FileSystemAccessRule("$($UserOrGroup)","$($Setting)","Allow")
+            $ACL.SetAccessRule($Rule)
+            $InstallFileObject.SetAccessControl($ACL)
+            Write-Log -Severity 1 -Source "Directory Permission Adjustments" -Message " - Success!"
+            return $true
+        } catch {
+            Write-Log -Severity 3 -Source "Directory Permission Adjustments" -Message " - Failed!"
+            return $false
+        }
+    } else {
+        Write-Log -Severity 3 -Source "Directory Permission Adjustments" -Message "Invalid or missing Arguments Passed to Set-AppFilePermissions Function!"
+        return $false
+    }
+}
+
+function Set-AppRegPermissions ($Setting, $RegPath) {
+    ########################################
+    # Modify Registry Permissions
+    # Function Date: 19.3.13.1
+    # Function by Sean Huggans and Chad Loevinger
+    ########################################
+    if (($Setting) -and ($RegPath)) {
+        try {
+            Write-Log -Severity 1 -Source "Registry Permission Adjustments" -Message "Setting ""$($Setting)"" permission on ""$($RegPath)""..."
+            $acl = Get-Acl "$($RegPath)"
+            $rule = New-Object System.Security.AccessControl.RegistryAccessRule ("everyone","$($Setting)","Allow")
+            $acl.SetAccessRule($rule)
+            $acl | Set-Acl -Path "$($RegPath)"
+            Write-Log -Severity 1 -Source "Registry Permission Adjustments" -Message " - Success!"
+            return $true
+        } catch {
+            Write-Log -Severity 3 -Source "Registry Permission Adjustments" -Message " - Error!"
+            return $false
+        }
+    } else {
+        Write-Log -Severity 3 -Source "Registry Permission Adjustments" -Message " - Error! (Incomplete Parameters Passed)"
+        return $false
+    }
+}
+
+function Add-FirewallRule ($RuleName, $RuleType, $ProtocolType, $PortNumber, $ProgramPath) {
+    ########################################
+    # Create Firewall Rule
+    # Function Date: 19.3.13.1
+    # Function By: Sean Huggans
+    ########################################
+    # Usage Note 1: function is dependent on the below 2 lines being present at the beginning of your script, as well as the standard logging function being present
+    $script:wmiOS = Get-WmiObject -Class Win32_OperatingSystem;
+    $script:OS = $wmiOS.Caption
+    # Usage Note 2: Use the Add-Firewall function below in your script, Call the function with the following examples:
+    # - Example 1 (Port): Add-FirewallRule -RuleName "ApplicationX" -RuleType Port -ProtocolType TCP -PortNumber 2233
+    # - Example 1 (Port Range): Add-FirewallRule -RuleName "ApplicationX" -RuleType Port -ProtocolType UDP -PortNumber 2233-2236
+    # - Example 2 (Process/Program): Add-FirewallRule -RuleName "ApplicationX" -RuleType Process -ProgramPath "C:\Program Files\Application X\X.exe"
+    #Usage Note 3: It may be benneficial to use the Other firewall related standard functions in order to ensure the firewall is enabled and active prior to calling this function!
+    try {
+        if ($OS -like "*Windows 1*") {
+            switch ($RuleType) {
+                "Port" {
+                    if ($PortNumber -notlike "*-*") {
+                        New-NetFirewallRule -DisplayName "$($RuleName) ($($ProtocolType) $($PortNumber))" -profile Domain -Direction Inbound -Action Allow -Protocol $($ProtocolType) -LocalPort $PortNumber -ErrorAction Stop | Out-Null
+                    } else {
+                        Write-Log -Severity 1 -Source "Firewall Adjustments" -Message " - (Info!) Port Number ($PortNumber) is a Range, Attempting to add it now..."
+                        New-NetFirewallRule -DisplayName "$($RuleName) ($($ProtocolType) $($PortNumber))" -profile Domain -Direction Inbound -Action Allow -Protocol $($ProtocolType) -LocalPort $PortNumber -ErrorAction Stop | Out-Null
+                    }
+                    Write-Log -Severity 1 -Source "Firewall Adjustments" -Message " - - Successfully created rule ""$($RuleName) ($($ProtocolType) $($PortNumber))"", Allowing inbound connections on $($ProtocolType) port ""$($PortNumber)"""
+                    return $true
+                }
+                "Process" {
+                    # Using Split instead get-ItemProperty incase the application is not yet installed when this is called
+                    $ProgramSplit = $ProgramPath.Split("\")
+                    $ProgramName = $ProgramSplit[$($ProgramSplit.Length -1)]
+                    New-NetFirewallRule -DisplayName "$($RuleName) ($($ProgramName))" -profile Domain -Direction Inbound -Program $ProgramPath -Action Allow -ErrorAction Stop | Out-Null
+                    Write-Log -Severity 1 -Source "Firewall Adjustments" -Message " - Successfully created rule ""$($RuleName) ($($ProgramName))"", Allowing inbound connections to ""$($ProgramPath)"""
+                    return $true
+                }
+                default {
+                    Write-Log -Severity 3 -Source "Firewall Adjustments" -Message " - Error: Unknown Rule Type ($($RuleType)) called attempting to create rule ("$($RuleName) ($($ProtocolType))")!  Check syntax!"
+                    return $false
+                }
+            }
+        } else {
+            switch ($RuleType) {
+                "Port" {
+                    if ($PortNumber -notlike "*-*") {
+                        $result = $(& netsh advfirewall firewall add rule name="$($RuleName) ($($ProtocolType) $($PortNumber))" dir=in action=allow protocol=$($ProtocolType) localport=$($PortNumber))[0]
+                    } else {
+                        Write-Log -Severity 1 -Source "Firewall Adjustments" -Message " - - (Info!) Port Number ($PortNumber) is a Range, Attempting to add it now..."
+                        $result = $(& netsh advfirewall firewall add rule name="$($RuleName) ($($ProtocolType) $($PortNumber))" dir=in action=allow protocol=$($ProtocolType) localport=$($PortNumber))[0]
+                    }
+                    if ($result -like "*Ok.*") {
+                        Write-Log -Severity 1 -Source "Firewall Adjustments" -Message " - Successfully created rule ""$($RuleName) ($($ProtocolType))"", Allowing inbound connections on $($ProtocolType) port ""$($PortNumber)"""
+                        return $true
+                    } else {
+                        Write-Log -Severity 3 -Source "Firewall Adjustments" -Message " - Error!  The following NETSH command did not return ""Ok."": netsh advfirewall firewall add rule name=""$($RuleName) ($($ProtocolType) $($PortNumber))"" dir=in action=allow protocol=$($ProtocolType) localport=$($PortNumber)"
+                        return $false
+                    }
+                }
+                "Process" {
+                    # Using Split instead get-ItemProperty incase the application is not yet installed when this is called
+                    $ProgramSplit = $ProgramPath.Split("\")
+                    $ProgramName = $ProgramSplit[$($ProgramSplit.Length -1)]
+                    $result = $(& netsh advfirewall firewall add rule name="$($RuleName) ($($ProgramName))" action=allow protocol=any enable=yes dir=in program="$($ProgramPath)")[0]
+                    if ($result -like "*Ok.*") {
+                        Write-Log -Severity 1 -Source "Firewall Adjustments" -Message " - Successfully created rule ""$($RuleName) ($($ProgramName))"", Allowing inbound connections to ""$($ProgramPath)"""
+                        return $true
+                    } else {
+                        Write-Log -Severity 3 -Source "Firewall Adjustments" -Message " - Error!  The following NETSH command did not return ""Ok."": netsh advfirewall firewall add rule name=""$($RuleName) ($($ProgramName))"" action=allow protocol=any enable=yes dir=in program="$($ProgramPath)""
+                        return $false    
+                    }
+                }
+                default {
+                    Write-Log -Severity 3 -Source "Firewall Adjustments" -Message " - Error: Unknown Rule Type ($($RuleType)) called attempting to create rule ("$($RuleName) ($($ProtocolType))")!  Check syntax!"
+                    return $false
+                }
+            }
+        }
+    } catch {
+        Write-Log -Severity 3 -Source "Firewall Adjustments" -Message " - Error creating rule ""$($RuleName) ($($ProtocolType))""!"
+        return $false
+    }
+}
+
+###################################################################
+# End visuaFUSION Systems Solutions Additional Provided Functions #
+###################################################################
+
+###################################################################
+# Start Community Additional Provided Functions                   #
+###################################################################
+
+function Set-RegistryDetection ([string]$AppName, [string]$AppVersion)
+{
+	################################
+	# Function Version 22.04.21.01
+	# Function by Blake Volk
+	################################
+	# Function creates a name/value pair at the following registry path: HKLM:\SOFTWARE\Sanford\Deployment.
+	# Usually helpful for standalone executables or shortcuts when detection via product code is not possible.
+	# Notes: 
+	# - Relies on Log-Action function to be in place to use.  Comment out Log-Action lines if logging is not needed (for non-app packaging scenarios) in order to get this to run.
+	# - It is okay to remove note and description comments, but please leave the function version intact so that this function can be easily updated in the future for all scripts with older versions if necessary.
+	# Typical usage
+	# - Set-RegistryDetection -AppName "CPR+ Shortcut" -AppVersion "22.04.21.01"
+	# Using global variables. note: Removes spaces in app name when inserted into the registry
+	# - Set-RegistryDetection -AppName $appName -AppVersion $appVersion
+	
+	#Verifying Sanford Deployments Registry Path exists. Will create it if not found.
+	if (!(Test-Path -Path "HKLM:\SOFTWARE\Sanford\Deployment"))
+	{
+		try
+		{
+			Write-Log -Severity 1 -Source "Set Registry Detection" -Message "Registry Path was not found, attempted to add Sanford Deployment Registry Path..."
+			New-Item -Path "HKLM:\SOFTWARE\Sanford\Deployment"
+			New-ItemProperty -Path "HKLM:\Software\Sanford\Deployment" -Name $AppName -Type String -Value $AppVersion -Force
+			Write-Log -Severity 1 -Source "Set Registry Detection" -Message "Registry Path `"HKLM:\SOFTWARE\Sanford\Deployment`" was created!"
+		}
+		catch
+		{
+			Write-Log -Severity 3 -Source "Set Registry Detection" -Message "Failed creating HKLM:\SOFTWARE\Sanford\Deployment..."
+			return $false
+		}		
+	}
+	else
+	{
+		try
+		{
+			Write-Log -Severity 1 -Source "Set Registry Detection" -Message "Registry Path was not found, attempted to add Sanford Deployment Registry Path..."
+			New-ItemProperty -Path "HKLM:\Software\Sanford\Deployment" -Name $AppName -Type String -Value $AppVersion -Force
+			Write-Log -Severity 1 -Source "Set Registry Detection" -Message "Registry detection was created!"
+		}
+		catch
+		{
+			Write-Log -Severity 3 -Source "Set Registry Detection" -Message "Failed creating registry detection for $($appName)..."
+			return $false
+		}
+	}
+}
+
+function Set-ServicePerms ([string]$ServiceName)
+{
+	################################
+	# Function Version 22.10.14.1
+	# Function by Joshua Slieter, Blake Volk
+	################################
+	# Description: This function allows the domain users AD group to modify a specified service. The parameter, ServiceName, requires the Service name found in the properties of the service rather than the Display Name
+
+	# Typical usage example. The example line below will give domain users access to stop/start/etc. on the BITS service. Using "Background Intelligent Transfer Service" would not work.
+	# Set-ServicePerms -ServiceName BITS
+
+    # Online docs: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/set-service?view=powershell-7.2#example-9-change-the-securitydescriptor-of-a-service
+	
+    # The security descriptior. This specific descriptor gives the Domain Users group full permissions on a service to stop, start, etc. Other descriptors can be made by following: KB????????
+    $SDDL = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;SU)"
+
+	try
+	{
+		Write-Log -Severity 1 -Source "Set ServiceShim" -Message "Attemping to shim the service $($ServiceName)..."
+		Set-Service -Name $ServiceName -SecurityDescriptorSddl $SDDL -ErrorAction stop
+		Write-Log -Severity 1 -Source "Set ServiceShim" -Message "Service Shim for $($ServiceName) was created!"
+	}
+	catch
+	{
+		Write-Log -Severity 3 -Source "Set ServiceShim" -Message "Failed creating Service Shim for $($ServiceName)."
+        return $false
+	}
+}
+
+function Set-AppShimDB ([string]$ApplicationName, [string]$ApplicationDirPath, [string]$SDBName)
+{
+	################################
+	# Function Version 22.10.17.1
+	# Function by Sean Huggans, Blake Volk, Joshua Slieter
+	################################
+	# Description: This function will copy a .sdb file to the application's directory and then call sdbinst to install the .sdb file. You must still create the .sdb file using the Compatibility Administrator application. Place this file in the Files folder. 
+    # It will also give modify permissions for Domain Users to the application's directory. 
+	
+	# Typical usage example on the line below. Provide the name of the application (for logging purposes), the directory to where the executable will be located on target devices, and the created .sdb filename within the Files folder.
+	# Set-AppShim -ApplicationName CytoVision -ApplicationDirPath "C:\Program Files (x86)\Applied Imaging\CytoVision" -SDBName "CytovisionRunAsInvoker.sdb"
+
+	try
+	{
+		Write-Log -Severity 1 -Source "Set-AppShim" -Message "Attemping to apply shim database to the application $($ApplicationName)..."
+		
+        if ($(Set-AppDirPermissions -UserOrGroup "Domain Users" -Setting "Modify" -DirPath "$($ApplicationDirPath)") -eq $true) {
+
+            Write-Log -Severity 1 -Source "Set-AppShim" -Message "Copying $($SDBName).sdb to path: $($ApplicationDirPath)"
+            Copy-Item -Path "$($dirFiles)\$($SDBName).sdb" -Destination "$($ApplicationDirPath)\$($SDBName).sdb"
+            
+            try {
+                Start-Process -FilePath sdbinst.exe -ArgumentList "-q ""$($ApplicationDirPath)\$($SDBName).sdb""" -Wait -ErrorAction Stop
+                Write-Log -Severity 1 -Source "Set-AppShim" -Message "Successfully applied shim DB for the application: $($ApplicationName)"
+            } catch {
+                Write-Log -Severity 1 -Source "Set-AppShim" -Message "Failed to apply shim DB for the application: $($ApplicationName)"
+            }
+        }
+		Write-Log -Severity 1 -Source "Set-AppShim" -Message "App Shim DB for $($ApplicationName) was applied!"
+	}
+	catch
+	{
+		Write-Log -Severity 3 -Source "Set-AppShim" -Message "Failed Applying the App Shim DB for $($ApplicationName)."
+	}
+}
+
+###################################################################
+# End Community Additional Provided Functions                     #
+###################################################################
+
 Try {
     ## Set the script execution policy for this process
-    Try {
-        Set-ExecutionPolicy -ExecutionPolicy 'ByPass' -Scope 'Process' -Force -ErrorAction 'Stop'
-    }
-    Catch {
-    }
-
+    Try { 
+		Set-ExecutionPolicy -ExecutionPolicy 'ByPass' -Scope 'Process' -Force -ErrorAction 'Stop' 
+	} 
+	Catch {
+	}
+																						 
     ##*===============================================
     ##* VARIABLE DECLARATION
     ##*===============================================
@@ -134,39 +426,39 @@ Try {
     [Hashtable]$deployAppScriptParameters = $PsBoundParameters
 
     ## Variables: Environment
-    If (Test-Path -LiteralPath 'variable:HostInvocation') {
-        $InvocationInfo = $HostInvocation
-    }
-    Else {
-        $InvocationInfo = $MyInvocation
-    }
+    If (Test-Path -LiteralPath 'variable:HostInvocation') { 
+		$InvocationInfo = $HostInvocation 
+	} 
+	Else { 
+		$InvocationInfo = $MyInvocation 
+	}
     [String]$scriptDirectory = Split-Path -Path $InvocationInfo.MyCommand.Definition -Parent
 
     ## Dot source the required App Deploy Toolkit Functions
     Try {
         [String]$moduleAppDeployToolkitMain = "$scriptDirectory\AppDeployToolkit\AppDeployToolkitMain.ps1"
         If (-not (Test-Path -LiteralPath $moduleAppDeployToolkitMain -PathType 'Leaf')) {
-            Throw "Module does not exist at the specified location [$moduleAppDeployToolkitMain]."
-        }
+			Throw "Module does not exist at the specified location [$moduleAppDeployToolkitMain]."
+		}
         If ($DisableLogging) {
-            . $moduleAppDeployToolkitMain -DisableLogging
-        }
-        Else {
-            . $moduleAppDeployToolkitMain
-        }
+			. $moduleAppDeployToolkitMain -DisableLogging
+		} 
+		Else { 
+			. $moduleAppDeployToolkitMain 
+		}
     }
     Catch {
         If ($mainExitCode -eq 0) {
-            [Int32]$mainExitCode = 60008
-        }
+			[Int32]$mainExitCode = 60008 
+		}
         Write-Error -Message "Module [$moduleAppDeployToolkitMain] failed to load: `n$($_.Exception.Message)`n `n$($_.InvocationInfo.PositionMessage)" -ErrorAction 'Continue'
         ## Exit the script, returning the exit code to SCCM
-        If (Test-Path -LiteralPath 'variable:HostInvocation') {
-            $script:ExitCode = $mainExitCode; Exit
-        }
-        Else {
-            Exit $mainExitCode
-        }
+        If (Test-Path -LiteralPath 'variable:HostInvocation') { 
+			$script:ExitCode = $mainExitCode; Exit 
+		} 
+		Else { 
+			Exit $mainExitCode 
+		}
     }
 
     #endregion
@@ -182,13 +474,14 @@ Try {
         [String]$installPhase = 'Pre-Installation'
 
         ## Show Welcome Message, close Internet Explorer if required, allow up to 3 deferrals, verify there is enough disk space to complete the install, and persist the prompt
-        Show-InstallationWelcome -CloseApps 'iexplore' -AllowDefer -DeferTimes 3 -CheckDiskSpace -PersistPrompt
+		## <INSERT INSTALLATION LAUNCH STRING>
 
         ## Show Progress Message (with the default message)
         Show-InstallationProgress
 
         ## <Perform Pre-Installation tasks here>
-
+        ## <INJECT FIREWALL RULE ADJUSTMENTS>
+			
 
         ##*===============================================
         ##* INSTALLATION
@@ -197,12 +490,12 @@ Try {
 
         ## Handle Zero-Config MSI Installations
         If ($useDefaultMsi) {
-            [Hashtable]$ExecuteDefaultMSISplat = @{ Action = 'Install'; Path = $defaultMsiFile }; If ($defaultMstFile) {
-                $ExecuteDefaultMSISplat.Add('Transform', $defaultMstFile)
-            }
-            Execute-MSI @ExecuteDefaultMSISplat; If ($defaultMspFiles) {
-                $defaultMspFiles | ForEach-Object { Execute-MSI -Action 'Patch' -Path $_ }
-            }
+            [Hashtable]$ExecuteDefaultMSISplat = @{ Action = 'Install'; Path = $defaultMsiFile }; If ($defaultMstFile) { 
+				$ExecuteDefaultMSISplat.Add('Transform', $defaultMstFile) 
+			}
+            Execute-MSI @ExecuteDefaultMSISplat; If ($defaultMspFiles) { 
+				$defaultMspFiles | ForEach-Object { Execute-MSI -Action 'Patch' -Path $_ } 
+			}
         }
 
         ## <Perform Installation tasks here>
@@ -214,11 +507,21 @@ Try {
         [String]$installPhase = 'Post-Installation'
 
         ## <Perform Post-Installation tasks here>
+		## <INJECT PERMISSION ADJUSTMENTS>
 
+        ## Create Public Desktop Shortcut
+        ## <INJECT PUBLIC DESKTOP SHORTCUT ICO LINE>
+        ## <INJECT PUBLIC DESKTOP SHORTCUT LINE>
+		
+		## Create Custom Shortcut
+        ## <INJECT CUSTOM SHORTCUT ICO LINE>
+        ## <INJECT CUSTOM SHORTCUT LINE>
+		
         ## Display a message at the end of the install
-        If (-not $useDefaultMsi) {
-            Show-InstallationPrompt -Message 'You can customize text to appear at the end of an install or remove it completely for unattended installations.' -ButtonRightText 'OK' -Icon Information -NoWait
-        }
+		## <INJECT COMPLETION MESSAGE>
+        
+		## Reboot with a timer end of the install (10 minute default, do not allow hiding the window for the last minute)
+        ## <INJECT REBOOT MESSAGE>
     }
     ElseIf ($deploymentType -ieq 'Uninstall') {
         ##*===============================================
@@ -227,7 +530,7 @@ Try {
         [String]$installPhase = 'Pre-Uninstallation'
 
         ## Show Welcome Message, close Internet Explorer with a 60 second countdown before automatically closing
-        Show-InstallationWelcome -CloseApps 'iexplore' -CloseAppsCountdown 60
+		## <INSERT INSTALLATION LAUNCH STRING>
 
         ## Show Progress Message (with the default message)
         Show-InstallationProgress
@@ -242,9 +545,9 @@ Try {
 
         ## Handle Zero-Config MSI Uninstallations
         If ($useDefaultMsi) {
-            [Hashtable]$ExecuteDefaultMSISplat = @{ Action = 'Uninstall'; Path = $defaultMsiFile }; If ($defaultMstFile) {
-                $ExecuteDefaultMSISplat.Add('Transform', $defaultMstFile)
-            }
+            [Hashtable]$ExecuteDefaultMSISplat = @{ Action = 'Uninstall'; Path = $defaultMsiFile }; If ($defaultMstFile) { 
+				$ExecuteDefaultMSISplat.Add('Transform', $defaultMstFile) 
+			}
             Execute-MSI @ExecuteDefaultMSISplat
         }
 
@@ -257,7 +560,7 @@ Try {
         [String]$installPhase = 'Post-Uninstallation'
 
         ## <Perform Post-Uninstallation tasks here>
-
+        ## <INJECT PUBLIC DESKTOP SHORTCUT REMOVAL LINE>
 
     }
     ElseIf ($deploymentType -ieq 'Repair') {
@@ -267,7 +570,7 @@ Try {
         [String]$installPhase = 'Pre-Repair'
 
         ## Show Welcome Message, close Internet Explorer with a 60 second countdown before automatically closing
-        Show-InstallationWelcome -CloseApps 'iexplore' -CloseAppsCountdown 60
+		## <INSERT INSTALLATION LAUNCH STRING>
 
         ## Show Progress Message (with the default message)
         Show-InstallationProgress
